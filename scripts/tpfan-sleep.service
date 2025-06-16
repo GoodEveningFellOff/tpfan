@@ -1,0 +1,11 @@
+[Unit]
+Description=Kill tpfan on sleep
+Before=sleep.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/pkill -x -pwr tpfan
+ExecStart=sleep 3
+
+[Install]
+WantedBy=sleep.target
