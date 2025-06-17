@@ -3,10 +3,11 @@
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/stat.h>
 
 #define FAN_PATH "/proc/acpi/ibm/fan"
 #define SEN_PATH "/proc/acpi/ibm/thermal"
-#define PID_FILE "/run/tpfan.pid"
+#define CONFIG_FILE "/etc/tpfan.conf"
 
 typedef enum EFanLevel {
     EFanLevel0,
@@ -28,14 +29,9 @@ typedef struct TempSpeed{
     EFanLevel m_eFanLevel;
 } TempSpeed;
 
-static TempSpeed g_aTempSpeeds[] = {
-    { 0, 60, EFanLevelAuto },
-    { 60, 70, EFanLevel7 },
-    { 70, 0x7fffffff, EFanLevelDisengaged }
-};
-
-static size_t g_iCurrentSpeed = 2;
-static int g_iInterrupt = 0;
+static TempSpeed* g_aTempSpeeds = NULL;
+static size_t g_sizeTempSpeeds = 0;
+static size_t g_iCurrentSpeed = 0;
 
 void SetFanLevel(EFanLevel eLevel){
     FILE* pFile = fopen(FAN_PATH, "w");
@@ -92,6 +88,154 @@ void SetFanLevel(EFanLevel eLevel){
     fclose(pFile);
 }
 
+void LoadConfig(){
+    // Check if the file has been changed since we last checked it.
+    static time_t timeLast = 0;
+    struct stat statFile;
+    if(stat(CONFIG_FILE, &statFile) == -1 || statFile.st_mtim.tv_sec == timeLast){
+        return;
+    }
+    timeLast = statFile.st_mtim.tv_sec;
+
+    FILE* pFile = fopen(CONFIG_FILE, "r");
+    if(!pFile){
+        return;
+    }
+
+    size_t iLines = 0;
+    {
+        size_t sizeLine = 0;
+        int c;
+        while((c = fgetc(pFile)) != -1){
+            ++sizeLine;
+            if(c == '\n'){
+                if(sizeLine > 1){
+                    ++iLines;
+                }
+                sizeLine = 0;
+            }
+        }
+    }
+
+    if(iLines == 0){
+        fclose(pFile);
+        return;
+    }
+
+    rewind(pFile);
+    char szLine[1024];
+    char* pCursor = NULL;
+
+    // Free the old config.
+    if(g_aTempSpeeds){
+        free(g_aTempSpeeds);
+        g_aTempSpeeds = NULL;
+    }
+    g_sizeTempSpeeds = 0;
+    
+    // Allocate enough space for the new config.
+    g_aTempSpeeds = malloc(iLines * sizeof(TempSpeed));
+    if(!g_aTempSpeeds){
+        fclose(pFile);
+        return;
+    }
+
+    while(fgets(szLine, sizeof(szLine), pFile)){
+        pCursor = szLine;
+        
+        // Look for the start of the first number.
+        while(*pCursor && *pCursor != '-' && (*pCursor < '0' || *pCursor > '9')){
+            ++pCursor;
+        }
+        if(!*pCursor){
+            continue;
+        }
+
+        // Convert this to the minimum temperature.
+        g_aTempSpeeds[g_sizeTempSpeeds].m_iMinTemp = strtol(pCursor, &pCursor, 10);
+        if(!pCursor || !*pCursor){
+            continue;
+        }
+
+        // Look for the start of the second number.
+        while(*pCursor && *pCursor != '-' && (*pCursor < '0' || *pCursor > '9')){
+            ++pCursor;
+        }
+        if(!*pCursor){
+            continue;
+        }
+
+        // Convert this to the maximum temperature.
+        g_aTempSpeeds[g_sizeTempSpeeds].m_iMaxTemp = strtol(pCursor, &pCursor, 10);
+        if(!pCursor || !*pCursor){
+            continue;
+        }
+
+        // Look for the fan speed
+        while(*pCursor && *pCursor != 'a' && *pCursor != 'd' && *pCursor != 'f' && (*pCursor < '0' || *pCursor > '7')){
+            ++pCursor;
+        }
+        if(!*pCursor){
+            continue;
+        }
+
+        // Dont really need to match the full string of the fan speed, just need the first character.
+        switch(*pCursor){
+        case('d'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevelDisengaged;
+            break;
+            
+        case('f'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevelFullSpeed;
+            break;
+            
+        case('0'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevel0;
+            break;
+            
+        case('1'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevel1;
+            break;
+            
+        case('2'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevel2;
+            break;
+            
+        case('3'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevel3;
+            break;
+            
+        case('4'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevel4;
+            break;
+            
+        case('5'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevel5;
+            break;
+            
+        case('6'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevel6;
+            break;
+            
+        case('7'):
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevel7;
+            break;
+
+        default:
+            g_aTempSpeeds[g_sizeTempSpeeds].m_eFanLevel = EFanLevelAuto;
+            break;
+        }
+
+        ++g_sizeTempSpeeds;
+        if(g_sizeTempSpeeds == iLines){
+            break;
+        }
+    }
+
+    fclose(pFile);
+    return;
+}
+
 long GetTemperature(){
     static long iTemperature = 0;
     char szData[32];
@@ -102,7 +246,7 @@ long GetTemperature(){
     }
     
     iTemperature = 0;
-    for(char c = fgetc(pFile); c > 0; c = fgetc(pFile)){
+    for(int c = fgetc(pFile); c > 0; c = fgetc(pFile)){
         if(c == '-' || (c >= '0' && c <= '9')){
             if(sizeData < 30){
                 szData[sizeData++] = c;
@@ -132,9 +276,9 @@ long GetTemperature(){
     return iTemperature;
 }
 
-// Signal handler that will just set a global variable
 void SigHandler(int iSignal){
-    g_iInterrupt = iSignal;
+    SetFanLevel(EFanLevelAuto);
+    exit(0);
 }
 
 int main(int iArgs, char** aArgs){    
@@ -161,47 +305,32 @@ int main(int iArgs, char** aArgs){
         fclose(pFile);
     }
 
-    // Check the pid file to see if this app is already open.
-    FILE* pPIDFile = fopen(PID_FILE, "r");
-    if(pPIDFile){
-        fclose(pPIDFile);
-        printf("tpfan is likely already active, if nessisary pkill tpfan and delete \"%s\"!\n", PID_FILE);
-        return -1;
-    }
-
-    pPIDFile = fopen(PID_FILE, "w+");
-    if(!pPIDFile){
-        puts("Unable to open PID File!");
-        return -1;
-    }
-
     // Set the signal handler to handle terminating signals.
-    if(sigaction(SIGHUP, &stSigHandler, NULL) || sigaction(SIGINT, &stSigHandler, NULL) ||
-        sigaction(SIGTERM, &stSigHandler, NULL) || sigaction(SIGUSR2, &stSigHandler, NULL)){
+    #define DEF_SIGACTION(n) (sigaction(n, &stSigHandler, NULL))
+    if(DEF_SIGACTION(SIGHUP) || DEF_SIGACTION(SIGINT) || DEF_SIGACTION(SIGTERM)){
+    #undef DEF_SIGACTION
         puts("Failed to initialize signal handlers!");
         return -1;
     }
-
-    // Fork this process to the background.
-    pid_t pidChild = fork();
-    if(pidChild < 0){
-        puts("Unable to fork process!");
-        return -1;
-    }
-    else if(pidChild > 0){
-        printf("Child process %d created!\n", pidChild);
-        fprintf(pPIDFile, "%d", pidChild);
-        fclose(pPIDFile);
-        return 0;
-    }
     
-    // Mainloop, exit once a terminating signal is hit.
-    while(!g_iInterrupt){
+    
+    while(1){
         sleep(1);
+
+        LoadConfig();
+
+        if(!g_aTempSpeeds){
+            SetFanLevel(EFanLevelAuto);
+            continue;
+        }
+
+        if(g_iCurrentSpeed >= g_sizeTempSpeeds){
+            g_iCurrentSpeed = 0;
+        }
         
         iTemperature = GetTemperature();
         if(iTemperature < g_aTempSpeeds[g_iCurrentSpeed].m_iMinTemp || iTemperature > g_aTempSpeeds[g_iCurrentSpeed].m_iMaxTemp){
-            for(size_t i = 0; i < sizeof(g_aTempSpeeds) / sizeof(TempSpeed); ++i){
+            for(size_t i = 0; i < g_sizeTempSpeeds; ++i){
                 if(iTemperature >= g_aTempSpeeds[i].m_iMinTemp && iTemperature <= g_aTempSpeeds[i].m_iMaxTemp){
                     g_iCurrentSpeed = i;
                     break;
@@ -211,7 +340,4 @@ int main(int iArgs, char** aArgs){
 
         SetFanLevel(g_aTempSpeeds[g_iCurrentSpeed].m_eFanLevel);
     }
-
-    SetFanLevel(EFanLevelAuto);
-    remove(PID_FILE);
 }
